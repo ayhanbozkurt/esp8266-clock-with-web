@@ -14,8 +14,11 @@ import gc
 gc.collect()
 
 global epoch
+global nextsync
 epoch = 0
 
+ntptime.NTP_DELTA = ntptime.NTP_DELTA-10800	# GMT+3
+	
 sta = network.WLAN(network.STA_IF)
 sta.active(True)
 ap = network.WLAN(network.AP_IF)
@@ -36,6 +39,8 @@ green.off()
 
 i2c =  machine.I2C(scl=machine.Pin(4), sda=machine.Pin(5), freq=50000)
 lcd = I2cLcd(i2c, 0x27, 2, 16)
+lcd.custom_char(0, bytearray([0x04,0x0E,0x1B,0x0E,0x04,0x00,0x00,0x00]))
+
 bmp180 = BMP180(i2c)
 bmp180.oversample_sett = 2
 bmp180.baseline = 101325
@@ -52,13 +57,44 @@ header = """<!DOCTYPE html>
 <h1>ESP Web Server</h1>"""
 footer = """</body></html>"""
 
-def handleInterrupt(timer):
+def waitWiFi():
+	sta.active(True)
+	sta.connect()
+	while not sta.isconnected():
+		time.sleep_ms(500)
+		red.on()
+		time.sleep_ms(500)
+		red.off()
+	
+def waitNTP():
+	global epoch
+	global nextsync
+	sync=False
+	while not sync:
+		try:
+			epoch=ntptime.time()
+			sync=True
+		except OSError:
+			time.sleep_ms(500)
+			green.on()
+			time.sleep_ms(500)
+			green.off()
+	nextsync = epoch + 86400
+	sta.active(False)
+			
+def handleInterrupt0(timer0):
 	global epoch
 	epoch += 1
 	z=utime.localtime(epoch)
 	lcd.move_to(0,0)
 	lcd.putstr("%02d/%02d   %02d:%02d:%02d" %(z[2],z[1],z[3],z[4],z[5]))
-	
+
+def handleInterrupt1(timer1):
+	lcd.move_to(0,1)
+	v2=bmp180.temperature
+	v3=bmp180.pressure
+	lcd.putstr("%+.1f\0C %4d hPa" %(v2,v3/100))
+
 def web_page(SSID_cnt, SSID_list):
 	html = header + "<p>Number of Stations: <strong>"+ str(SSID_cnt) + """</strong></p>
 	<p>Select SSID</p>
@@ -133,37 +169,25 @@ if not pin.value():
 		conn.close()
 	
 else:
-	timer = machine.Timer(0)
-	timer.init(period=1000, mode=machine.Timer.PERIODIC, callback=handleInterrupt)
-
-	ntptime.NTP_DELTA = ntptime.NTP_DELTA-10800	# GMT+3
-
 	lcd.putstr("System is up...\nWaiting for WiFi")
 
-	lcd.custom_char(0, bytearray([0x04,0x0E,0x1B,0x0E,0x04,0x00,0x00,0x00]))
-
-	while not sta.isconnected():
-		time.sleep_ms(500)
-		red.on()
-		time.sleep_ms(500)
-		red.off()
+	waitWiFi()
 
 	lcd.clear()
 	lcd.putstr(str(sta.ifconfig()[0])+"\nGetting clock...")
 
-	sync=False
-	while not sync:
-		try:
-			epoch=ntptime.time()
-			sync=True
-		except OSError:
-			time.sleep(1)
+	waitNTP()
 
 	lcd.clear()
+	timer0 = machine.Timer(0)
+	timer0.init(period=1000, mode=machine.Timer.PERIODIC, callback=handleInterrupt0)
 
+	timer1 = machine.Timer(1)
+	handleInterrupt1(timer1)	# call once to get temp and pres displayed at startup
+	timer1.init(period=10000, mode=machine.Timer.PERIODIC, callback=handleInterrupt1)
+	
 	while True:
-		lcd.move_to(0,1)
-		v2=bmp180.temperature
-		v3=bmp180.pressure
-		lcd.putstr("%+.1f\0C   %6d" %(v2,v3))
-		time.sleep(10)
+		if epoch > nextsync:
+			waitWiFi()
+			waitNTP()
+		time.sleep(10)		
